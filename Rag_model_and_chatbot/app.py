@@ -8,10 +8,11 @@ import fitz
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import HuggingFacePipeline
-from langchain.prompts import PromptTemplate
-from langchain.chains.combine_documents.stuff import StuffDocumentsChain
-from langchain.chains import LLMChain, RetrievalQA
+from langchain_community.llms.huggingface_pipeline import HuggingFacePipeline
+
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 import streamlit.components.v1 as components
 
 
@@ -73,7 +74,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-BASE_PATH = "/home/abisheck/Abisheck_final_project_vcodez"
+BASE_PATH = r"C:\Users\Abisheck\Documents\Suganya_mam\python-Ai_job_search_with_rag_Chatbot\Rag_model_and_chatbot"
 ASSETS_PATH = os.path.join(BASE_PATH, "assets")
 SINGLE_BANNER_PATH = os.path.join(ASSETS_PATH, "banner7.png")
 
@@ -92,13 +93,12 @@ def get_image_as_bytes(path):
 
 @st.cache_resource(show_spinner=False)
 def load_resume_model():
-   
-    model_path = os.path.join(BASE_PATH, "saved_model/job_match_model")
-    if not os.path.exists(model_path):
-        return None
+    from sentence_transformers import SentenceTransformer
     try:
-        return SentenceTransformer(model_path, device="cpu")
-    except Exception:
+        model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+        return model
+    except Exception as e:
+        st.error(f"❌ Resume matching model failed to load: {e}")
         return None
 
 @st.cache_resource(show_spinner=False)
@@ -132,26 +132,50 @@ def load_embeddings_and_faiss():
 
 @st.cache_resource(show_spinner=False)
 def build_rag_chain():
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.runnables import RunnablePassthrough
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_groq import ChatGroq
+
     _, vectorstore = load_embeddings_and_faiss()
-    llm = load_flan_llm()
-    
-    if vectorstore is None or llm is None:
+
+    if vectorstore is None:
+        st.error("❌ FAISS vector store not found.")
         return None
 
-    prompt_template = PromptTemplate.from_template("""
-You are an intelligent IT career assistant. Answer clearly and professionally using only the context provided.
-If the context does not contain the answer, politely state that you do not have that specific information.
+    # LLM
+    llm = ChatGroq(
+        groq_api_key="",
+        model_name="llama-3.1-8b-instant",
+        temperature=0.2
+    )
+
+    prompt = PromptTemplate.from_template("""
+You are an expert IT career assistant.
+Answer clearly and professionally using ONLY the context.
+If context does not contain the answer, say "I don't have that exact information."
+
 Context:
 {context}
+
 Question:
 {question}
-Answer in detail:
-""")
-    llm_chain = LLMChain(llm=llm, prompt=prompt_template)
-    stuff_chain = StuffDocumentsChain(llm_chain=llm_chain, document_variable_name="context")
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    return RetrievalQA(retriever=retriever, combine_documents_chain=stuff_chain, return_source_documents=True)
+Final Answer:
+""")
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+    # Build the LCEL RAG chain (Latest method, NO RetrievalQA)
+    rag_chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    return rag_chain
+
 
 
 @st.cache_data
@@ -168,17 +192,14 @@ def load_data():
         return pd.DataFrame({'Job Title': [], 'Job Description': [], 'Skills': [], 'Certifications': [], 'combined': []})
 
 
-df = None
-resume_model = None
-rag_chain = None
+with st.spinner("Initializing AI models and data..."):
+    df = load_data()
+    resume_model = load_resume_model()
 
-try:
-    with st.spinner("Initializing AI models and data..."):
-        df = load_data()
-        resume_model = load_resume_model()
-        rag_chain = build_rag_chain()
-except Exception:
-    pass
+    #
+
+    rag_chain = build_rag_chain()
+   
 
 
 def extract_text(file):
@@ -402,27 +423,17 @@ elif page == "💬 Chatbot":
         
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking and retrieving knowledge..."):
-                response = rag_chain.invoke({"query": prompt})
-                
-            assistant_response = response["result"]
-            source_docs = response.get("source_documents", [])
+                assistant_response = rag_chain.invoke(prompt)
+
+
+           
             
           
             st.markdown("### ✅ Answer")
             st.write(assistant_response)
             
             
-            if source_docs:
-                with st.expander("📚 Show Knowledge Sources", expanded=False):
-                    for i, doc in enumerate(source_docs):
-                       
-                        snippet = doc.page_content.replace('\n', ' ').strip()
-                        snippet = (snippet[:200] + '...') if len(snippet) > 200 else snippet
-                        st.markdown(f"**Source {i+1} Snippet:** *{snippet}*")
-                        st.caption(f"Metadata (Job Title): {doc.metadata.get('Job Title', 'N/A')}")
-                        st.divider()
-            else:
-                 st.info("No specific knowledge documents were retrieved for this answer.")
+            
 
            
             st.session_state.messages.append({"role": "assistant", "content": assistant_response})
